@@ -7,6 +7,7 @@ import tensorflow as tf
 import numpy as np
 import warnings
 import os
+import streamlit.components.v1 as components  # For localStorage integration
 
 # Ignore warnings for a cleaner output
 warnings.filterwarnings('ignore')
@@ -23,15 +24,12 @@ st.set_page_config(
 def load_models_and_data():
     """Load all necessary models, encoders, and data files only once."""
     try:
-        # --- PATHS UPDATED FOR ORGANIZED FOLDERS ---
         df = pd.read_csv("data/basketball_matches_with_opponents.csv")
         rf_model = joblib.load('models/random_forest_model.pkl')
         lstm_model = tf.keras.models.load_model('models/lstm_stat_predictor.h5')
         team_encoder = joblib.load('models/team_encoder.pkl')
         scaler = joblib.load('models/scaler.pkl')
-        # ---------------------------------------------
 
-        # --- FEATURE ENGINEERING ---
         df['FG2_PCT'] = (df['FGM_2'] / df['FGA_2']).replace([np.inf, -np.inf], 0).fillna(0)
         df['FG3_PCT'] = (df['FGM_3'] / df['FGA_3']).replace([np.inf, -np.inf], 0).fillna(0)
         df['FT_PCT'] = (df['FTM'] / df['FTA']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -44,7 +42,6 @@ def load_models_and_data():
         
         rf_features = rf_model.feature_names_in_
 
-        # Use the loaded encoder to create the encoded columns in the dataframe
         df['team_encoded'] = team_encoder.transform(df['team'])
         df['opponent_team_encoded'] = team_encoder.transform(df['opponent_team'])
 
@@ -88,12 +85,10 @@ if df is not None:
 
     col1, col2 = st.columns(2)
     with col1:
-        # Set a default index that is within the bounds of the list
         default_home = "oklahoma_sooners"
         home_index = TEAMS.index(default_home) if default_home in TEAMS else 0
         home_team = st.selectbox("Select Home Team:", TEAMS, index=home_index)
     with col2:
-        # Set a different default index
         default_away = "baylor_bears"
         away_index = TEAMS.index(default_away) if default_away in TEAMS else 1
         away_team = st.selectbox("Select Away Team:", TEAMS, index=away_index)
@@ -103,7 +98,6 @@ if df is not None:
     else:
         if st.button("Predict Win Probability", type="primary"):
             with st.spinner("Analyzing matchup and running models..."):
-                # Attempt to get all necessary data
                 team_h2h_stats = get_matchup_mean_stats(home_team, away_team, df, team_encoder)
                 opponent_h2h_stats = get_matchup_mean_stats(away_team, home_team, df, team_encoder)
                 team_predicted_stats = predict_future_stats(home_team, df, team_encoder, scaler, lstm_model)
@@ -114,28 +108,24 @@ if df is not None:
                 prediction_made = False
                 input_features = {}
 
-                # TIER 1: Gold Standard (Head-to-head + LSTM)
                 if all([team_h2h_stats, opponent_h2h_stats, team_predicted_stats, opponent_predicted_stats]):
                     st.info("Using Tier 1 Prediction: Head-to-Head History + LSTM Forecast")
                     for col in stat_features:
                         input_features[col] = (0.8 * team_h2h_stats.get(col, 0)) + (0.2 * team_predicted_stats.get(col, 0))
                         input_features[f"opponent_{col}"] = (0.8 * opponent_h2h_stats.get(col, 0)) + (0.2 * opponent_predicted_stats.get(col, 0))
                     prediction_made = True
-                # TIER 2: Fallback (Overall Averages + LSTM)
                 elif all([team_predicted_stats, opponent_predicted_stats]):
                     st.warning("Using Tier 2 Prediction: Overall Season Averages + LSTM Forecast (No head-to-head history found).")
                     for col in stat_features:
                         input_features[col] = (0.6 * team_overall_stats.get(col, 0)) + (0.4 * team_predicted_stats.get(col, 0))
                         input_features[f"opponent_{col}"] = (0.6 * opponent_overall_stats.get(col, 0)) + (0.4 * opponent_predicted_stats.get(col, 0))
                     prediction_made = True
-                # TIER 3: Fallback (Head-to-head Only)
                 elif all([team_h2h_stats, opponent_h2h_stats]):
                     st.warning("Using Tier 3 Prediction: Head-to-Head History Only (Not enough recent games for LSTM).")
                     for col in stat_features:
                         input_features[col] = team_h2h_stats.get(col, 0)
                         input_features[f"opponent_{col}"] = opponent_h2h_stats.get(col, 0)
                     prediction_made = True
-                # TIER 4: Final Fallback (Overall Averages Only)
                 else:
                     st.warning("Using Tier 4 Prediction: Overall Season Averages Only (Limited data available).")
                     for col in stat_features:
@@ -148,10 +138,74 @@ if df is not None:
                     input_features["opponent_team_encoded"] = team_encoder.transform([away_team])[0]
                     input_df = pd.DataFrame([input_features])[rf_features]
                     win_proba = rf_model.predict_proba(input_df)[:, 1][0]
-                    
+
                     st.success("Prediction Complete!")
                     st.subheader(f"Predicted Win Probability for {home_team}")
                     st.progress(win_proba, text=f"{win_proba:.0%}")
                     st.write(f"The model predicts that the **{home_team}** have a **{win_proba:.0%}** chance of winning against the **{away_team}**.")
+                    
+                  
+                    predicted_winner = home_team if win_proba >= 0.5 else away_team
+                    win_percentage = win_proba if predicted_winner == home_team else 1 - win_proba
+                    history_entry = f"{home_team} vs {away_team} – {win_percentage:.0%} probability of {predicted_winner} winning"
+
+                    components.html(f"""
+                    <script>
+                        let newEntry = "{history_entry}";
+                        let history = JSON.parse(localStorage.getItem("matchHistory") || "[]");
+                        history.push(newEntry);
+                        localStorage.setItem("matchHistory", JSON.stringify(history));
+                    </script>
+                    """, height=0)
                 else:
                     st.error("Could not generate a prediction. Not enough data even for the most basic model.")
+
+  
+    st.markdown("---")
+    st.subheader("📜 Your Prediction History")
+    
+    components.html("""
+    <div id="historyBox" style="padding: 10px; color: white;"></div>
+    <script>
+    const historyData = JSON.parse(localStorage.getItem("matchHistory") || "[]");
+    const box = document.getElementById("historyBox");
+
+    if (historyData.length === 0) {
+        box.innerHTML = "<i style='color: #ccc;'>No match history yet.</i>";
+    } else {
+        box.innerHTML = "<h4 style='margin-bottom: 10px; color: white;'>Recent Predictions</h4>" +
+        historyData.reverse().map(item => `<div style='margin-bottom: 6px;'>${item}</div>`).join("");
+    }
+    </script>
+    """, height=300)
+
+
+   
+    components.html("""
+    <script>
+    function clearHistory() {
+        localStorage.removeItem("matchHistory");
+        window.parent.location.reload();
+    }
+    </script>
+
+    <div style="margin-top: 10px;">
+    <button onclick="clearHistory()"
+        style="
+        background-color: #0e1117;
+        color: white;
+        padding: 10px 18px;
+        border: 1px solid #444;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 15px;
+        transition: background-color 0.3s;
+        "
+        onmouseover="this.style.backgroundColor='#1f2937';"
+        onmouseout="this.style.backgroundColor='#0e1117';"
+    >
+        Clear Prediction History
+    </button>
+    </div>
+    """, height=80)
+
